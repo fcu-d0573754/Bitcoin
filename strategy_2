@@ -1,0 +1,205 @@
+class Strategy():
+    # option setting needed
+    def __setitem__(self, key, value):
+        self.options[key] = value
+
+    # option setting needed
+    def __getitem__(self, key):
+        return self.options.get(key, '')
+
+    def __init__(self):
+        # strategy property
+        self.subscribedBooks = {
+            'Bitfinex': {
+                'pairs': ['ETH-USDT'],
+            },
+        }
+        self.period = 10 * 60*24
+        self.options = {}
+
+        # user defined class attribute
+        self.last_type = 'sell'
+        self.last_cross_status = None
+        self.close_price_trace = np.array([])
+        self.ma_long = 10
+        self.ma_short = 5
+        self.UP = 1
+        self.DOWN = 2
+        self.KEEP = 0
+
+    def on_order_state_change(self,  order):
+        Log("on order state change message: " + str(order) + " order price: " + str(order["price"]))
+
+    def get_current_ma_cross(self):
+        s_ma = talib.SMA(self.close_price_trace, self.ma_short)[-1]
+        l_ma = talib.SMA(self.close_price_trace, self.ma_long)[-1]
+        if np.isnan(s_ma) or np.isnan(l_ma):
+            return None
+        if s_ma > l_ma:
+            return self.UP
+        return self.DOWN
+
+    def get_current_rsi(self):
+        """
+        Returns the signal for the strategy
+        """
+        rsi = talib.RSI(self.close_price_trace, self.ma_short)[-1]
+        if np.isnan(rsi):
+            return None
+        
+        signal = ""
+
+        # level 1 signal generation
+        if rsi > 80:
+            L1_signal_long = False
+            L1_signal_short = True
+            # print("RSI has reached and passed OVER-BOUGHT level")
+
+        elif rsi < 20:
+            L1_signal_long = True
+            L1_signal_short = False
+            # print("RSI has reached and passed OVER-SOLD level")
+
+        else:
+            L1_signal_long = False
+            L1_signal_short = False
+            # print("condition level one has not yet been met")
+
+        # level 2 signal generation
+        if L1_signal_long == True:
+            if rsi< 20 and rsi > 17.5:
+                signal = "Buy"
+                # print("level 2 signal is to LONG.")
+            elif rsi < 17.5:
+                signal = "Strong_Buy"
+                # print("level 2 signal is STRONG LONG")
+
+        elif L1_signal_short == True:
+            if rsi > 80 and rsi < 82.5:
+                signal = "Sell"
+                # print("level 2 signal is to SHORT.")
+            elif rsi > 82.5:
+                signal = "Strong_Sell"
+                # print("level 2 signal is STRONG SHORT")
+
+        return signal
+
+    # called every self.period
+    def trade(self, information):
+        exchange = list(information['candles'])[0]
+        pair = list(information['candles'][exchange])[0]
+        target_currency = pair.split('-')[0]  #ETH
+        base_currency = pair.split('-')[1]  #USDT
+        base_currency_amount = self['assets'][exchange][base_currency] 
+        target_currency_amount = self['assets'][exchange][target_currency] 
+        # add latest price into trace
+        close_price = information['candles'][exchange][pair][0]['close']
+        self.close_price_trace = np.append(self.close_price_trace, [float(close_price)])
+        # only keep max length of ma_long count elements
+        self.close_price_trace = self.close_price_trace[-self.ma_long:]
+        # calculate current ma cross status
+        cur_cross = self.get_current_ma_cross()
+        signal = self.get_current_rsi()
+        if cur_cross is None:
+            return []
+        if signal is None:
+            return []
+        if self.last_cross_status is None:
+            self.last_cross_status = cur_cross
+            return []
+        if signal == "Strong_Buy":
+            Log('buying 1 unit of ' + str(target_currency))
+            self.last_type = 'buy'
+            self.last_cross_status = cur_cross
+            return [
+                {
+                    'exchange': exchange,
+                    'amount': 1,
+                    'price': -1,
+                    'type': 'MARKET',
+                    'pair': pair,
+                }
+            ]
+        elif signal == "Strong_Sell":
+            Log('assets before selling: ' + str(self['assets'][exchange][base_currency]))
+            self.last_type = 'sell'
+            self.last_cross_status = cur_cross
+            return [
+                {
+                    'exchange': exchange,
+                    'amount': -target_currency_amount,
+                    'price': -1,
+                    'type': 'MARKET',
+                    'pair': pair,
+                }
+            ]
+        elif signal == "Sell":
+            if self.last_type == 'buy' and cur_cross == self.DOWN and self.last_cross_status == self.UP:
+                Log('assets before selling: ' + str(self['assets'][exchange][base_currency]))
+                self.last_type = 'sell'
+                self.last_cross_status = cur_cross
+                return [
+                    {
+                        'exchange': exchange,
+                        'amount': -target_currency_amount,
+                        'price': -1,
+                        'type': 'MARKET',
+                        'pair': pair,
+                    }
+                ]
+            else:
+                Log('assets before selling: ' + str(self['assets'][exchange][base_currency]))
+                self.last_type = 'sell'
+                self.last_cross_status = cur_cross
+                return [
+                    {
+                        'exchange': exchange,
+                        'amount': -target_currency_amount*0.7,
+                        'price': -1,
+                        'type': 'MARKET',
+                        'pair': pair,
+                    }
+                ]
+        elif signal == "Buy":
+            Log('buying 1 unit of ' + str(target_currency))
+            self.last_type = 'buy'
+            self.last_cross_status = cur_cross
+            return [
+                {
+                    'exchange': exchange,
+                    'amount': 1,
+                    'price': -1,
+                    'type': 'MARKET',
+                    'pair': pair,
+                }
+            ]
+        # cross up
+        elif self.last_type == 'sell' and cur_cross == self.UP and self.last_cross_status == self.DOWN:
+            Log('buying 1 unit of ' + str(target_currency))
+            self.last_type = 'buy'
+            self.last_cross_status = cur_cross
+            return [
+                {
+                    'exchange': exchange,
+                    'amount': 1,
+                    'price': -1,
+                    'type': 'MARKET',
+                    'pair': pair,
+                }
+            ]
+        # cross down
+        elif self.last_type == 'buy' and cur_cross == self.DOWN and self.last_cross_status == self.UP:
+            Log('assets before selling: ' + str(self['assets'][exchange][base_currency]))
+            self.last_type = 'sell'
+            self.last_cross_status = cur_cross
+            return [
+                {
+                    'exchange': exchange,
+                    'amount': -target_currency_amount,
+                    'price': -1,
+                    'type': 'MARKET',
+                    'pair': pair,
+                }
+            ]
+        self.last_cross_status = cur_cross
+        return []
